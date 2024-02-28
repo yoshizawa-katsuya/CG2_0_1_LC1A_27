@@ -5,9 +5,11 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <cassert>
+#include <dxgidebug.h>
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib,"dxguid.lib")
 
 void Log(const std::string& message) {
 	OutputDebugStringA(message.c_str());
@@ -263,27 +265,14 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 	rtvHandles[1].ptr = rtvHandles[0].ptr + device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 	device->CreateRenderTargetView(swapChainResources[1], &rtvDesc, rtvHandles[1]);
 
-	//これから書き込むバックバッファのインデックスを取得
-	UINT backBufferIndex = swapChain->GetCurrentBackBufferIndex();
-
-	commandList->OMSetRenderTargets(1, &rtvHandles[backBufferIndex], false, nullptr);
-
-	float clearColor[] = { 0.1f, 0.25f, 0.5f, 1.0f };
-	commandList->ClearRenderTargetView(rtvHandles[backBufferIndex], clearColor, 0, nullptr);
-
-	hr = commandList->Close();
+	//初期値0でFenceを作る
+	ID3D12Fence* fence = nullptr;
+	uint64_t fenceValue = 0;
+	hr = device->CreateFence(fenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
 	assert(SUCCEEDED(hr));
 
-	//GPUにコマンドリストの実行を行わせる
-	ID3D12CommandList* commandLists[] = { commandList };
-	commandQueue->ExecuteCommandLists(1, commandLists);
-
-	swapChain->Present(1, 0);
-
-	hr = commandAllocator->Reset();
-	assert(SUCCEEDED(hr));
-	hr = commandList->Reset(commandAllocator, nullptr);
-	assert(SUCCEEDED(hr));
+	HANDLE fenceEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+	assert(fenceEvent != nullptr);
 
 
 	MSG msg{};
@@ -294,11 +283,95 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 			DispatchMessage(&msg);
 		}
 		else {
+			//ゲームの処理
+
+			//これから書き込むバックバッファのインデックスを取得
+			UINT backBufferIndex = swapChain->GetCurrentBackBufferIndex();
+
+			//TransitionBarrierの設定
+			D3D12_RESOURCE_BARRIER barrier{};
+
+			barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+
+			barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+
+			barrier.Transition.pResource = swapChainResources[backBufferIndex];
+
+			barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+
+			barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+			commandList->ResourceBarrier(1, &barrier);
+
+
+			commandList->OMSetRenderTargets(1, &rtvHandles[backBufferIndex], false, nullptr);
+
+			float clearColor[] = { 0.1f, 0.25f, 0.5f, 1.0f };
+			commandList->ClearRenderTargetView(rtvHandles[backBufferIndex], clearColor, 0, nullptr);
+
+
+			barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+			barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+
+			commandList->ResourceBarrier(1, &barrier);
+
+
+			hr = commandList->Close();
+			assert(SUCCEEDED(hr));
+
+			//GPUにコマンドリストの実行を行わせる
+			ID3D12CommandList* commandLists[] = { commandList };
+			commandQueue->ExecuteCommandLists(1, commandLists);
+
+			swapChain->Present(1, 0);
+
+			//Fenceの値を更新
+			fenceValue++;
+
+			commandQueue->Signal(fence, fenceValue);
+
+			//Fenceの値が指定したSignak値にたどり着いているか確認する
+			if (fence->GetCompletedValue() < fenceValue)
+			{
+				fence->SetEventOnCompletion(fenceValue, fenceEvent);
+				WaitForSingleObject(fenceEvent, INFINITE);
+			}
+
+			hr = commandAllocator->Reset();
+			assert(SUCCEEDED(hr));
+			hr = commandList->Reset(commandAllocator, nullptr);
+			assert(SUCCEEDED(hr));
 
 		}
 	}
 
 	OutputDebugStringA("Hello,DirectX!\n");
+
+	CloseHandle(fenceEvent);
+	fence->Release();
+	rtvDescriptorHeap->Release();
+	swapChainResources[0]->Release();
+	swapChainResources[1]->Release();
+	swapChain->Release();
+	commandList->Release();
+	commandAllocator->Release();
+	commandQueue->Release();
+	device->Release();
+	useAdapter->Release();
+	dxgiFactory->Release();
+#ifdef DEBUG
+	debugController->Relese();
+#endif // DEBUG
+	CloseWindow(hwnd);
+
+
+	IDXGIDebug1* debug;
+	if (SUCCEEDED(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&debug)))) {
+		debug->ReportLiveObjects(DXGI_DEBUG_ALL, DXGI_DEBUG_RLO_ALL);
+		debug->ReportLiveObjects(DXGI_DEBUG_APP, DXGI_DEBUG_RLO_ALL);
+		debug->ReportLiveObjects(DXGI_DEBUG_D3D12, DXGI_DEBUG_RLO_ALL);
+		debug->Release();
+	}
 
 	return 0;
 }
